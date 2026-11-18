@@ -1,0 +1,27 @@
+# Environment secrets & local configuration
+.env
+.env.*
+!.env.example
+
+# Private keys & certificates
+*.key
+*.pem
+*.pub
+
+# Dependencies, build artifacts & logs
+node_modules/
+*.log
+npm-debug.log*
+app/server.linux.mjs
+görseller/
+runtime/node.exe
+
+# Runtime database, tokens, password hashes & uploaded documents
+storage/data/*
+!storage/data/.gitkeep
+storage/media/folders/*
+!storage/media/folders/.gitkeep
+
+# OS & editor artifacts
+.DS_Store
+Thumbs.db

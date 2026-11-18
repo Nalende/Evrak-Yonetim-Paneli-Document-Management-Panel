@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Warm Editorial Landing Page Utilities */
+.font-editorial-serif {
+  font-family: Georgia, 'Palatino Linotype', 'Book Antiqua', Cambria, 'Times New Roman', Times, serif;
+}
+
+.font-editorial-sans {
+  font-family: Inter, 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+}
+
+.paper-grain-surface {
+  background-color: #F5F2EB;
+  background-image:
+    radial-gradient(rgba(32, 42, 39, 0.03) 1px, transparent 0),
+    radial-gradient(rgba(197, 142, 86, 0.04) 1px, transparent 0);
+  background-size: 28px 28px;
+  background-position: 0 0, 14px 14px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .editorial-landing *,
+  .editorial-landing *::before,
+  .editorial-landing *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Özel Kaydırma Çubuğu (Timeline ve Paneller için) */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.4);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.55);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.8);
+}
