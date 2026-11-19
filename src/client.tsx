@@ -2105,13 +2105,15 @@ function computeAnchoredPanForZoom(
   startZoom: number,
   nextZoom: number,
   startPanX: number,
-  startPanY: number
+  startPanY: number,
+  targetX: number = anchorX,
+  targetY: number = anchorY
 ): { x: number; y: number } {
   const docX = (anchorX - vcx - (baseShiftX * startZoom + startPanX)) / startZoom;
   const docY = (anchorY - vcy - startPanY) / startZoom;
   return clampViewerPan(
-    anchorX - vcx - docX * nextZoom - baseShiftX * nextZoom,
-    anchorY - vcy - docY * nextZoom
+    targetX - vcx - docX * nextZoom - baseShiftX * nextZoom,
+    targetY - vcy - docY * nextZoom
   );
 }
 
@@ -5595,6 +5597,8 @@ export const FlipHTML5BookStage: React.FC<{
     const uiObj = (flip as any).getUI?.();
     const flipCtrl = (flip as any).getFlipController?.();
     const distEl: HTMLElement | undefined = uiObj?.getDistElement?.() ?? uiObj?.distElement;
+    let dragStartPos: { x: number; y: number } | null = null;
+    let dragLastPos: { x: number; y: number } | null = null;
 
     if (uiObj && distEl) {
       // Zoom seviyesine (CSS transform: scale) göre fare/dokunma koordinatlarını normalize et
@@ -5610,37 +5614,68 @@ export const FlipHTML5BookStage: React.FC<{
         };
       };
 
+      if (typeof uiObj.onTouchStart === 'function') {
+        distEl.removeEventListener('touchstart', uiObj.onTouchStart);
+        uiObj.onTouchStart = (ev: TouchEvent) => {
+          if (ev.touches.length !== 1) return;
+          if (!uiObj.checkTarget(ev.target) || ev.changedTouches.length === 0) return;
+          const t = ev.changedTouches[0];
+          const pos = uiObj.getMousePos(t.clientX, t.clientY);
+          uiObj.touchPoint = {
+            point: pos,
+            clientX: t.clientX,
+            clientY: t.clientY,
+            time: Date.now(),
+            isDragging: false,
+          };
+          if (ev.cancelable) ev.preventDefault();
+        };
+        distEl.addEventListener('touchstart', uiObj.onTouchStart, { passive: false });
+      }
+
+      if (typeof uiObj.onTouchMove === 'function') {
+        window.removeEventListener('touchmove', uiObj.onTouchMove);
+        uiObj.onTouchMove = (ev: TouchEvent) => {
+          const tp = uiObj.touchPoint;
+          if (!tp || ev.touches.length !== 1 || ev.changedTouches.length === 0) return;
+          const t = ev.changedTouches[0];
+          const pos = uiObj.getMousePos(t.clientX, t.clientY);
+          const screenDist = Math.hypot(t.clientX - tp.clientX, t.clientY - tp.clientY);
+          if (!tp.isDragging) {
+            if (screenDist <= 10) return;
+            tp.isDragging = true;
+            (flip as any).startUserTouch(tp.point);
+            (flip as any).isUserMove = true;
+            dragLastPos = { ...pos };
+            flipCtrl?.fold?.(pos);
+            return;
+          }
+          dragLastPos = { ...pos };
+          flipCtrl?.fold?.(pos);
+        };
+        window.addEventListener('touchmove', uiObj.onTouchMove, { passive: false });
+      }
+
       if (typeof uiObj.onTouchEnd === 'function') {
         window.removeEventListener('touchend', uiObj.onTouchEnd);
         uiObj.onTouchEnd = (ev: TouchEvent) => {
-          if (ev.changedTouches.length > 0) {
-            const t = ev.changedTouches[0];
-            const pos = uiObj.getMousePos(t.clientX, t.clientY);
-            let isSwipe = false;
-            if (uiObj.touchPoint !== null) {
-              const dx = pos.x - uiObj.touchPoint.point.x;
-              const dy = Math.abs(pos.y - uiObj.touchPoint.point.y);
-              if (
-                Math.abs(dx) > uiObj.swipeDistance &&
-                dy < 2 * uiObj.swipeDistance &&
-                Date.now() - uiObj.touchPoint.time < uiObj.swipeTimeout
-              ) {
-                const r = renderObj?.getRect?.();
-                const midY = r ? r.top + r.height / 2 : flipCanvasH / 2;
-                const corner = uiObj.touchPoint.point.y < midY ? 'top' : 'bottom';
-                if (dx > 0) {
-                  (flip as any).flipPrev(corner);
-                } else {
-                  (flip as any).flipNext(corner);
-                }
-                isSwipe = true;
-              }
-              uiObj.touchPoint = null;
-            }
-            (flip as any).userStop(pos, isSwipe);
+          const tp = uiObj.touchPoint;
+          if (!tp || ev.changedTouches.length === 0) return;
+          const t = ev.changedTouches[0];
+          const pos = uiObj.getMousePos(t.clientX, t.clientY);
+          uiObj.touchPoint = null;
+          if (ev.cancelable) ev.preventDefault();
+
+          if (!tp.isDragging) {
+            // Tek dokunuş (tap): sayfa otomatik çevrilsin
+            (flip as any).startUserTouch(tp.point);
+            (flip as any).userStop(tp.point, false);
+            return;
           }
+
+          (flip as any).userStop(pos, false);
         };
-        window.addEventListener('touchend', uiObj.onTouchEnd);
+        window.addEventListener('touchend', uiObj.onTouchEnd, { passive: false });
       }
     }
 
@@ -6052,8 +6087,6 @@ export const FlipHTML5BookStage: React.FC<{
       distEl.addEventListener('touchstart', onCaptureTouchStart, true);
     }
 
-    let dragStartPos: { x: number; y: number } | null = null;
-    let dragLastPos: { x: number; y: number } | null = null;
     const origStartUserTouch = (flip as any).startUserTouch?.bind(flip);
     const origUserMove = (flip as any).userMove?.bind(flip);
     const origUserStop = (flip as any).userStop?.bind(flip);
@@ -6176,12 +6209,15 @@ export const FlipHTML5BookStage: React.FC<{
         let shouldComplete = pos.x <= 0;
         if (dragStartPos && dragLastPos) {
           const dx = dragLastPos.x - dragStartPos.x;
+          const zScale = Math.max(1, useViewerStore.getState().zoomLevel);
+          const completeDx = 32 / zScale;
+          const cancelDx = 10 / zScale;
           if (dir === 0) {
-            if (dx <= -32) shouldComplete = true;
-            else if (dx > -10) shouldComplete = false;
+            if (dx <= -completeDx) shouldComplete = true;
+            else if (dx > -cancelDx) shouldComplete = false;
           } else {
-            if (dx >= 32) shouldComplete = true;
-            else if (dx < 10) shouldComplete = false;
+            if (dx >= completeDx) shouldComplete = true;
+            else if (dx < cancelDx) shouldComplete = false;
           }
         }
 
@@ -6477,6 +6513,7 @@ export const FlipHTML5BookStage: React.FC<{
           return;
         }
         const dist = Math.max(12, touchDist(e.touches[0], e.touches[1]));
+        const mid = touchMid2(e.touches[0], e.touches[1]);
         const nextZoom = clampViewerZoom(g.startZoom * (dist / g.startDist));
         const rect = el.getBoundingClientRect();
         const anchored = computeAnchoredPanForZoom(
@@ -6488,7 +6525,9 @@ export const FlipHTML5BookStage: React.FC<{
           g.startZoom,
           nextZoom,
           g.startPanX,
-          g.startPanY
+          g.startPanY,
+          mid.x,
+          mid.y
         );
         setZoomAndPan(nextZoom, anchored.x, anchored.y);
       }
@@ -7358,9 +7397,8 @@ export const CitizenViewerPage: React.FC<{ isPublicRoute?: boolean }> = ({
         {showTouchHelp && (
           <div className="pointer-events-auto md:hidden w-full rounded-xl bg-[#1e2533]/95 backdrop-blur-md border border-amber-500/40 px-3 py-2 text-[11px] text-slate-200 shadow-2xl flex items-center justify-between gap-2">
             <span>
-              <strong className="text-amber-300">1 parmak:</strong> Sayfa çevir •{' '}
-              <strong className="text-amber-300">2 parmak:</strong> Yakınlaş/Uzaklaş •{' '}
-              <strong className="text-amber-300">3 parmak:</strong> Taşı
+              <strong className="text-amber-300">1 parmak:</strong> Dokun veya sürükle (sayfa çevir) •{' '}
+              <strong className="text-amber-300">2 parmak:</strong> Yakınlaştır &amp; Taşı
             </span>
             <button
               type="button"
