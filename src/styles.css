@@ -49,3 +49,17 @@
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(148, 163, 184, 0.8);
 }
+
+/* Mobil görüntüleyici dokunma kilidi (PageFlip'in touch-action: pan-y kuralını ezer) */
+.viewer-stage-lock,
+.viewer-stage-lock .stf__parent,
+.viewer-stage-lock .stf__wrapper,
+.viewer-stage-lock .stf__block,
+.viewer-stage-lock canvas {
+  touch-action: none !important;
+  -ms-touch-action: none !important;
+  overscroll-behavior: none !important;
+  -webkit-user-select: none !important;
+  user-select: none !important;
+  -webkit-touch-callout: none !important;
+}

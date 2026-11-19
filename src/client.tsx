@@ -2080,6 +2080,41 @@ export const useAdminStore = create<AdminState>((set, get) => ({
 
 const completedSpotlightPageIds = new Set<string>();
 
+const MIN_VIEWER_ZOOM = 0.2;
+const MAX_VIEWER_ZOOM = 4.5;
+const PAN_LIMIT_X = 2600;
+const PAN_LIMIT_Y = 2200;
+
+function clampViewerZoom(zoom: number): number {
+  return Math.max(MIN_VIEWER_ZOOM, Math.min(MAX_VIEWER_ZOOM, Number(zoom.toFixed(2))));
+}
+
+function clampViewerPan(x: number, y: number): { x: number; y: number } {
+  return {
+    x: Math.max(-PAN_LIMIT_X, Math.min(PAN_LIMIT_X, x)),
+    y: Math.max(-PAN_LIMIT_Y, Math.min(PAN_LIMIT_Y, y)),
+  };
+}
+
+function computeAnchoredPanForZoom(
+  anchorX: number,
+  anchorY: number,
+  vcx: number,
+  vcy: number,
+  baseShiftX: number,
+  startZoom: number,
+  nextZoom: number,
+  startPanX: number,
+  startPanY: number
+): { x: number; y: number } {
+  const docX = (anchorX - vcx - (baseShiftX * startZoom + startPanX)) / startZoom;
+  const docY = (anchorY - vcy - startPanY) / startZoom;
+  return clampViewerPan(
+    anchorX - vcx - docX * nextZoom - baseShiftX * nextZoom,
+    anchorY - vcy - docY * nextZoom
+  );
+}
+
 interface ViewerState {
   folder: FolderItem | null;
   workspace: PublicWorkspace | null;
@@ -2090,6 +2125,7 @@ interface ViewerState {
   currentPageIndex: number;
   a3UnfoldTarget: Record<string, number>;
   a3UnfoldCurrent: Record<string, number>;
+  defaultFitZoom: number;
   zoomLevel: number;
   panOffset: { x: number; y: number };
   isSpotlightActive: boolean;
@@ -2101,7 +2137,9 @@ interface ViewerState {
     opts?: { isPublic?: boolean; pin?: string; workspaceId?: string }
   ) => Promise<void>;
   resetViewer: () => void;
+  setDefaultFitZoom: (fitZoom: number, applyNow?: boolean) => void;
   setZoomLevel: (zoom: number) => void;
+  setZoomAndPan: (zoom: number, x: number, y: number) => void;
   zoomIn: () => void;
   zoomOut: () => void;
   resetCameraView: () => void;
@@ -2130,6 +2168,7 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
   currentPageIndex: -1,
   a3UnfoldTarget: {},
   a3UnfoldCurrent: {},
+  defaultFitZoom: 1.0,
   zoomLevel: 1.0,
   panOffset: { x: 0, y: 0 },
   isSpotlightActive: false,
@@ -2198,30 +2237,41 @@ export const useViewerStore = create<ViewerState>((set, get) => ({
       activeHotspotIndex: 0,
     }),
 
-  setZoomLevel: (zoom) => {
-    const clamped = Math.max(0.55, Math.min(3.5, Number(zoom.toFixed(2))));
-    if (clamped <= 1.02) {
-      set({ zoomLevel: clamped, panOffset: { x: 0, y: 0 } });
+  setDefaultFitZoom: (fitZoom, applyNow = false) => {
+    const clampedFit = clampViewerZoom(Math.min(1.0, fitZoom));
+    if (applyNow) {
+      set({ defaultFitZoom: clampedFit, zoomLevel: clampedFit, panOffset: { x: 0, y: 0 } });
     } else {
-      set({ zoomLevel: clamped });
+      set({ defaultFitZoom: clampedFit });
     }
   },
-  zoomIn: () => get().setZoomLevel(get().zoomLevel + 0.25),
-  zoomOut: () => get().setZoomLevel(get().zoomLevel - 0.25),
-  resetCameraView: () => set({ zoomLevel: 1.0, panOffset: { x: 0, y: 0 } }),
+  setZoomLevel: (zoom) => {
+    set({ zoomLevel: clampViewerZoom(zoom) });
+  },
+  setZoomAndPan: (zoom, x, y) => {
+    set({
+      zoomLevel: clampViewerZoom(zoom),
+      panOffset: clampViewerPan(x, y),
+    });
+  },
+  zoomIn: () => {
+    const cur = get().zoomLevel;
+    const step = cur < 1.0 ? 0.15 : 0.25;
+    get().setZoomLevel(cur + step);
+  },
+  zoomOut: () => {
+    const cur = get().zoomLevel;
+    const step = cur <= 1.0 ? 0.15 : 0.25;
+    get().setZoomLevel(cur - step);
+  },
+  resetCameraView: () => set({ zoomLevel: get().defaultFitZoom, panOffset: { x: 0, y: 0 } }),
   setPanOffset: (x, y) =>
     set({
-      panOffset: {
-        x: Math.max(-1400, Math.min(1400, x)),
-        y: Math.max(-1200, Math.min(1200, y)),
-      },
+      panOffset: clampViewerPan(x, y),
     }),
   addPanOffset: (dxPx, dyPx) =>
     set((state) => ({
-      panOffset: {
-        x: Math.max(-1400, Math.min(1400, state.panOffset.x + dxPx)),
-        y: Math.max(-1200, Math.min(1200, state.panOffset.y + dyPx)),
-      },
+      panOffset: clampViewerPan(state.panOffset.x + dxPx, state.panOffset.y + dyPx),
     })),
 
   openCoverAndStart: () => {
@@ -5109,11 +5159,12 @@ export const SpotlightOverlay: React.FC<{ cutoutRect: ScreenCutoutRect | null }>
   const currentHotspot = page.hotspots[activeHotspotIndex];
   if (!currentHotspot) return null;
 
+  const popoverWidth = Math.min(370, Math.max(260, viewport.width - 24));
   const popoverPos = computeSmartPopoverPlacement(
     cutoutRect,
     viewport.width,
     viewport.height,
-    370,
+    popoverWidth,
     225
   );
 
@@ -5184,8 +5235,8 @@ export const SpotlightOverlay: React.FC<{ cutoutRect: ScreenCutoutRect | null }>
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.95 }}
           transition={{ type: 'spring', stiffness: 300, damping: 26 }}
-          style={{ left: popoverPos.left, top: popoverPos.top, width: 370 }}
-          className="fixed z-50 rounded-2xl bg-slate-900/95 border-2 border-amber-500 shadow-[0_20px_60px_rgba(0,0,0,0.75)] p-5 text-slate-100"
+          style={{ left: popoverPos.left, top: popoverPos.top, width: popoverWidth }}
+          className="fixed z-50 rounded-2xl bg-slate-900/95 border-2 border-amber-500 shadow-[0_20px_60px_rgba(0,0,0,0.75)] p-4 sm:p-5 text-slate-100"
         >
           <div className="flex items-center justify-between mb-2">
             <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[11px] font-extrabold">
@@ -5226,6 +5277,24 @@ export const SpotlightOverlay: React.FC<{ cutoutRect: ScreenCutoutRect | null }>
   );
 };
 
+function computeStageMetrics(): { w: number; h: number; fitZoom: number } {
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 820;
+  const isMobile = vw < 768;
+  const h = Math.max(460, Math.min(860, vh - (isMobile ? 24 : 40)));
+  const w = Math.round(h * (210 / 297));
+  const padX = isMobile ? 16 : 120;
+  const padY = isMobile ? 116 : 40;
+  const fitZoom = Math.min(
+    1.0,
+    Math.max(
+      MIN_VIEWER_ZOOM,
+      Number(Math.min((vw - padX) / (w * 2), (vh - padY) / h).toFixed(2))
+    )
+  );
+  return { w, h, fitZoom };
+}
+
 export const FlipHTML5BookStage: React.FC<{
   onUpdateSpotlightRect: (rect: ScreenCutoutRect | null) => void;
 }> = ({ onUpdateSpotlightRect }) => {
@@ -5239,9 +5308,10 @@ export const FlipHTML5BookStage: React.FC<{
 
   const syncFromFlipbookSpread = useViewerStore((s) => s.syncFromFlipbookSpread);
   const toggleA3Unfold = useViewerStore((s) => s.toggleA3Unfold);
+  const setDefaultFitZoom = useViewerStore((s) => s.setDefaultFitZoom);
   const setZoomLevel = useViewerStore((s) => s.setZoomLevel);
+  const setZoomAndPan = useViewerStore((s) => s.setZoomAndPan);
   const addPanOffset = useViewerStore((s) => s.addPanOffset);
-  const setPanOffset = useViewerStore((s) => s.setPanOffset);
   const openCoverAndStart = useViewerStore((s) => s.openCoverAndStart);
 
   const stageViewportRef = useRef<HTMLDivElement>(null);
@@ -5251,6 +5321,9 @@ export const FlipHTML5BookStage: React.FC<{
   const isSyncingFromFlipRef = useRef(false);
   const hasAutoOpenedCoverRef = useRef<string | null>(null);
   const syncWindowFnRef = useRef<((centerDocIdx: number) => void) | null>(null);
+  const cancelPageFlipTouchRef = useRef<() => void>(() => {});
+  const baseCenterShiftXRef = useRef(0);
+  const lastAutoFitZoomRef = useRef<number | null>(null);
   const loadedDocCanvasesRef = useRef<
     Map<number, { front: HTMLCanvasElement; back: HTMLCanvasElement }>
   >(new Map());
@@ -5258,29 +5331,65 @@ export const FlipHTML5BookStage: React.FC<{
 
   const [isFlipAnimating, setIsFlipAnimating] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
+  const [isGestureActive, setIsGestureActive] = useState(false);
 
   const panDragRef = useRef({ active: false, lastX: 0, lastY: 0 });
+  const touchGestureRef = useRef<{
+    mode: 'idle' | 'single' | 'pinch' | 'pan3' | 'cooldown';
+    startDist: number;
+    startZoom: number;
+    startPanX: number;
+    startPanY: number;
+    startMidX: number;
+    startMidY: number;
+    lastPanX: number;
+    lastPanY: number;
+  }>({
+    mode: 'idle',
+    startDist: 0,
+    startZoom: 1,
+    startPanX: 0,
+    startPanY: 0,
+    startMidX: 0,
+    startMidY: 0,
+    lastPanX: 0,
+    lastPanY: 0,
+  });
   const a3SwipeRef = useRef<{ startX: number | null; triggered: boolean }>({
     startX: null,
     triggered: false,
   });
 
   const [pageDims, setPageDims] = useState(() => {
-    const vh = typeof window !== 'undefined' ? window.innerHeight : 820;
-    const h = Math.max(460, vh - 40);
-    const w = Math.round(h * (210 / 297));
-    return { w, h };
+    const metrics = computeStageMetrics();
+    return { w: metrics.w, h: metrics.h };
   });
 
   useEffect(() => {
+    const metrics = computeStageMetrics();
+    lastAutoFitZoomRef.current = metrics.fitZoom;
+    setDefaultFitZoom(metrics.fitZoom, true);
+  }, [folder?.id, setDefaultFitZoom]);
+
+  useEffect(() => {
     const onResize = () => {
-      const h = Math.max(460, window.innerHeight - 40);
-      const w = Math.round(h * (210 / 297));
-      setPageDims({ w, h });
+      const m = computeStageMetrics();
+      const prevAuto = lastAutoFitZoomRef.current;
+      const st = useViewerStore.getState();
+      const isAtAutoFit =
+        prevAuto !== null &&
+        Math.abs(st.zoomLevel - prevAuto) <= 0.02 &&
+        st.panOffset.x === 0 &&
+        st.panOffset.y === 0;
+      lastAutoFitZoomRef.current = m.fitZoom;
+      setDefaultFitZoom(m.fitZoom, isAtAutoFit);
+      setPageDims((prev) =>
+        Math.abs(m.w - prev.w) > 16 || Math.abs(m.h - prev.h) > 16 ? { w: m.w, h: m.h } : prev
+      );
     };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
-  }, []);
+  }, [setDefaultFitZoom]);
 
   const pages = useMemo(
     () => (folder ? [...folder.pages].sort((a, b) => a.orderIndex - b.orderIndex) : []),
@@ -5337,6 +5446,7 @@ export const FlipHTML5BookStage: React.FC<{
       startPage: initialSheetIndex,
       showPageCorners: false,
       useMouseEvents: true,
+      mobileScrollSupport: false,
       swipeDistance: 30,
       clickEventForward: true,
       disableFlipByClick: false,
@@ -5845,6 +5955,7 @@ export const FlipHTML5BookStage: React.FC<{
     const onCaptureTouchStart = (ev: TouchEvent) => {
       const touch = ev.touches?.[0];
       if (
+        ev.touches.length > 1 ||
         useViewerStore.getState().isSpotlightActive ||
         (touch && isOutsideHalfCoverArea(touch.clientX, touch.clientY))
       ) {
@@ -5987,6 +6098,24 @@ export const FlipHTML5BookStage: React.FC<{
           flipCtrl.animateFlippingTo(pos, { x: activeW, y: endY }, false);
         }
       };
+      cancelPageFlipTouchRef.current = () => {
+        if (uiObj) uiObj.touchPoint = null;
+        (flip as any).isUserTouch = false;
+        (flip as any).isUserMove = false;
+        dragStartPos = null;
+        dragLastPos = null;
+        if (flipCtrl?.calc) {
+          try {
+            const pos = flipCtrl.calc.getPosition();
+            const bounds = flipCtrl.getBoundsRect();
+            const activeW = flipCtrl.calc.pageWidth === flapW ? flapW : bounds.pageWidth;
+            const endY = flipCtrl.calc.getCorner() === 'bottom' ? bounds.height : 0;
+            flipCtrl.animateFlippingTo(pos, { x: activeW, y: endY }, false);
+          } catch {
+            // ignore
+          }
+        }
+      };
     }
 
     flip.on('changeState', (e: any) => {
@@ -6008,6 +6137,7 @@ export const FlipHTML5BookStage: React.FC<{
     return () => {
       cancelled = true;
       syncWindowFnRef.current = null;
+      cancelPageFlipTouchRef.current = () => {};
       if (distEl) {
         distEl.removeEventListener('mousedown', onCaptureMouseDown, true);
         distEl.removeEventListener('touchstart', onCaptureTouchStart, true);
@@ -6116,23 +6246,202 @@ export const FlipHTML5BookStage: React.FC<{
   const handleStageWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     e.preventDefault();
     const step = e.deltaY < 0 ? 0.14 : -0.14;
-    const nextZoom = Math.max(0.55, Math.min(3.5, Number((zoomLevel + step).toFixed(2))));
+    const nextZoom = clampViewerZoom(zoomLevel + step);
     if (nextZoom === zoomLevel) return;
 
     const rect = stageViewportRef.current?.getBoundingClientRect();
-    if (rect && e.deltaY < 0) {
-      const cursorOffsetX = e.clientX - (rect.left + rect.width / 2);
-      const cursorOffsetY = e.clientY - (rect.top + rect.height / 2);
-      const scaleFactor = nextZoom / zoomLevel - 1;
-      setPanOffset(
-        panOffset.x - cursorOffsetX * scaleFactor * 0.45,
-        panOffset.y - cursorOffsetY * scaleFactor * 0.45
+    if (rect) {
+      const anchored = computeAnchoredPanForZoom(
+        e.clientX,
+        e.clientY,
+        rect.left + rect.width / 2,
+        rect.top + rect.height / 2,
+        baseCenterShiftXRef.current,
+        zoomLevel,
+        nextZoom,
+        panOffset.x,
+        panOffset.y
       );
-    } else if (nextZoom <= 1.02) {
-      setPanOffset(0, 0);
+      setZoomAndPan(nextZoom, anchored.x, anchored.y);
+    } else {
+      setZoomLevel(nextZoom);
     }
-    setZoomLevel(nextZoom);
   };
+
+  useEffect(() => {
+    const el = stageViewportRef.current;
+    if (!el || !folder) return;
+
+    const touchDist = (t0: Touch, t1: Touch) =>
+      Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+    const touchMid2 = (t0: Touch, t1: Touch) => ({
+      x: (t0.clientX + t1.clientX) / 2,
+      y: (t0.clientY + t1.clientY) / 2,
+    });
+    const touchCentroid3 = (t0: Touch, t1: Touch, t2: Touch) => ({
+      x: (t0.clientX + t1.clientX + t2.clientX) / 3,
+      y: (t0.clientY + t1.clientY + t2.clientY) / 3,
+    });
+
+    const beginPinch = (touches: TouchList) => {
+      const g = touchGestureRef.current;
+      const mid = touchMid2(touches[0], touches[1]);
+      const st = useViewerStore.getState();
+      g.mode = 'pinch';
+      g.startDist = Math.max(12, touchDist(touches[0], touches[1]));
+      g.startZoom = st.zoomLevel;
+      g.startPanX = st.panOffset.x;
+      g.startPanY = st.panOffset.y;
+      g.startMidX = mid.x;
+      g.startMidY = mid.y;
+      setIsGestureActive(true);
+    };
+
+    const beginPan3 = (touches: TouchList) => {
+      const g = touchGestureRef.current;
+      const c = touchCentroid3(touches[0], touches[1], touches[2]);
+      g.mode = 'pan3';
+      g.lastPanX = c.x;
+      g.lastPanY = c.y;
+      setIsGestureActive(true);
+    };
+
+    const onTouchStart = (e: TouchEvent) => {
+      const g = touchGestureRef.current;
+      const target = e.target;
+      if (
+        e.touches.length === 1 &&
+        target instanceof Element &&
+        target.closest('[data-viewer-ui="true"]')
+      ) {
+        return;
+      }
+
+      if (e.touches.length >= 3) {
+        if (e.cancelable) e.preventDefault();
+        e.stopPropagation();
+        cancelPageFlipTouchRef.current();
+        if (g.mode !== 'cooldown') {
+          beginPan3(e.touches);
+        }
+        return;
+      }
+
+      if (e.touches.length === 2) {
+        if (e.cancelable) e.preventDefault();
+        e.stopPropagation();
+        cancelPageFlipTouchRef.current();
+        if (g.mode !== 'cooldown') {
+          beginPinch(e.touches);
+        }
+        return;
+      }
+
+      if (e.touches.length === 1) {
+        if (g.mode === 'cooldown') {
+          if (e.cancelable) e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        g.mode = 'single';
+      }
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      const g = touchGestureRef.current;
+      if (g.mode === 'idle' && e.touches.length === 1) {
+        return;
+      }
+
+      if (e.cancelable) e.preventDefault();
+
+      if (g.mode === 'cooldown') {
+        e.stopPropagation();
+        return;
+      }
+
+      if (e.touches.length >= 3) {
+        e.stopPropagation();
+        cancelPageFlipTouchRef.current();
+        if (g.mode !== 'pan3') {
+          beginPan3(e.touches);
+          return;
+        }
+        const c = touchCentroid3(e.touches[0], e.touches[1], e.touches[2]);
+        const dx = c.x - g.lastPanX;
+        const dy = c.y - g.lastPanY;
+        g.lastPanX = c.x;
+        g.lastPanY = c.y;
+        addPanOffset(dx, dy);
+        return;
+      }
+
+      if (e.touches.length === 2) {
+        e.stopPropagation();
+        cancelPageFlipTouchRef.current();
+        if (g.mode !== 'pinch') {
+          beginPinch(e.touches);
+          return;
+        }
+        const dist = Math.max(12, touchDist(e.touches[0], e.touches[1]));
+        const nextZoom = clampViewerZoom(g.startZoom * (dist / g.startDist));
+        const rect = el.getBoundingClientRect();
+        const anchored = computeAnchoredPanForZoom(
+          g.startMidX,
+          g.startMidY,
+          rect.left + rect.width / 2,
+          rect.top + rect.height / 2,
+          baseCenterShiftXRef.current,
+          g.startZoom,
+          nextZoom,
+          g.startPanX,
+          g.startPanY
+        );
+        setZoomAndPan(nextZoom, anchored.x, anchored.y);
+      }
+    };
+
+    const onTouchEndOrCancel = (e: TouchEvent) => {
+      const g = touchGestureRef.current;
+      if (g.mode === 'pinch' || g.mode === 'pan3' || g.mode === 'cooldown') {
+        if (e.cancelable) e.preventDefault();
+        e.stopPropagation();
+        if (e.touches.length === 0) {
+          g.mode = 'idle';
+          setIsGestureActive(false);
+        } else {
+          g.mode = 'cooldown';
+        }
+        return;
+      }
+      if (g.mode === 'single' && e.touches.length === 0) {
+        g.mode = 'idle';
+      }
+    };
+
+    const onWebkitGesture = (e: Event) => {
+      if (e.cancelable) e.preventDefault();
+      e.stopPropagation();
+    };
+
+    el.addEventListener('touchstart', onTouchStart, { capture: true, passive: false });
+    el.addEventListener('touchmove', onTouchMove, { capture: true, passive: false });
+    el.addEventListener('touchend', onTouchEndOrCancel, { capture: true, passive: false });
+    el.addEventListener('touchcancel', onTouchEndOrCancel, { capture: true, passive: false });
+    el.addEventListener('gesturestart', onWebkitGesture, { capture: true, passive: false });
+    el.addEventListener('gesturechange', onWebkitGesture, { capture: true, passive: false });
+    el.addEventListener('gestureend', onWebkitGesture, { capture: true, passive: false });
+
+    return () => {
+      el.removeEventListener('touchstart', onTouchStart, true);
+      el.removeEventListener('touchmove', onTouchMove, true);
+      el.removeEventListener('touchend', onTouchEndOrCancel, true);
+      el.removeEventListener('touchcancel', onTouchEndOrCancel, true);
+      el.removeEventListener('gesturestart', onWebkitGesture, true);
+      el.removeEventListener('gesturechange', onWebkitGesture, true);
+      el.removeEventListener('gestureend', onWebkitGesture, true);
+    };
+  }, [folder?.id, addPanOffset, setZoomAndPan]);
 
   useEffect(() => {
     if (!isSpotlightActive || !folder || currentPageIndex < 0) {
@@ -6213,12 +6522,15 @@ export const FlipHTML5BookStage: React.FC<{
   } else if (currentPageIndex > 0) {
     dynamicCenterShiftX = -Math.round(pageDims.w * 0.06);
   }
+  baseCenterShiftXRef.current = dynamicCenterShiftX;
+  const scaledCenterShiftX = Math.round(dynamicCenterShiftX * zoomLevel);
 
   const paperMarginR = Math.round(pageDims.w * (20 / 760));
   const paperMarginY = Math.round(pageDims.h * (18 / 1075));
   const paperW = pageDims.w - paperMarginR;
   const paperH = pageDims.h - paperMarginY * 2;
-  const fixedUiScale = Number((1 / Math.max(0.55, zoomLevel)).toFixed(3));
+  const fixedUiScale = Number(Math.min(1.35, Math.max(0.55, 1 / Math.max(0.35, zoomLevel))).toFixed(3));
+  const immediateMotion = isPanning || isGestureActive;
 
   return (
     <div
@@ -6244,7 +6556,7 @@ export const FlipHTML5BookStage: React.FC<{
         }
       }}
       onWheel={handleStageWheel}
-      className={`w-full h-full flex items-center justify-center overflow-hidden relative select-none ${
+      className={`viewer-stage-lock w-full h-full flex items-center justify-center overflow-hidden relative select-none ${
         isPanning ? 'cursor-grabbing' : 'cursor-default'
       }`}
       style={{
@@ -6256,14 +6568,14 @@ export const FlipHTML5BookStage: React.FC<{
         animate={{
           scale: zoomLevel,
           opacity: 1,
-          x: dynamicCenterShiftX + panOffset.x,
+          x: scaledCenterShiftX + panOffset.x,
           y: panOffset.y,
         }}
         transition={{
-          scale: { type: 'spring', stiffness: 220, damping: 25 },
+          scale: immediateMotion ? { duration: 0 } : { type: 'spring', stiffness: 220, damping: 25 },
           opacity: { duration: 0.28 },
-          x: isPanning ? { duration: 0 } : { duration: 0.48, ease: [0.22, 1, 0.36, 1] },
-          y: isPanning ? { duration: 0 } : { duration: 0.35, ease: [0.22, 1, 0.36, 1] },
+          x: immediateMotion ? { duration: 0 } : { duration: 0.48, ease: [0.22, 1, 0.36, 1] },
+          y: immediateMotion ? { duration: 0 } : { duration: 0.35, ease: [0.22, 1, 0.36, 1] },
         }}
         className="relative flex items-center justify-center"
       >
@@ -6340,6 +6652,7 @@ export const FlipHTML5BookStage: React.FC<{
 
             {activePage && activePage.paperSize === 'A3' && !isA3Unfolded && !isFlipAnimating && (
               <div
+                data-viewer-ui="true"
                 style={{
                   transform: `translateY(-50%) scale(${fixedUiScale})`,
                   transformOrigin: 'right center',
@@ -6420,6 +6733,7 @@ export const FlipHTML5BookStage: React.FC<{
                 ))}
 
                 <div
+                  data-viewer-ui="true"
                   style={{
                     transform: `translateY(-50%) scale(${fixedUiScale})`,
                     transformOrigin: 'right center',
@@ -6582,7 +6896,7 @@ export const CitizenShelfPage: React.FC<{ isSharedWorkspace?: boolean }> = ({
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-8">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-5 sm:py-8">
         <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
           <div>
             {workspace?.displayName && (
@@ -6600,16 +6914,16 @@ export const CitizenShelfPage: React.FC<{ isSharedWorkspace?: boolean }> = ({
             )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
             {folders.length > 0 && (
-              <div className="relative">
+              <div className="relative w-full sm:w-48">
                 <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Dosya ara..."
-                  className="pl-8 pr-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-amber-500 w-48"
+                  className="pl-8 pr-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-amber-500 w-full sm:w-48"
                 />
               </div>
             )}
@@ -6731,8 +7045,27 @@ export const CitizenViewerPage: React.FC<{ isPublicRoute?: boolean }> = ({
 
   const [spotlightRect, setSpotlightRect] = useState<ScreenCutoutRect | null>(null);
   const [showThumbDrawer, setShowThumbDrawer] = useState(false);
+  const [showTouchHelp, setShowTouchHelp] = useState(false);
   const [isAutoPlaying, setIsAutoPlaying] = useState(false);
   const [muted, setMuted] = useState(getPageSoundMuted());
+
+  useEffect(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    const prevHtmlOverscroll = html.style.overscrollBehavior;
+    const prevBodyOverscroll = body.style.overscrollBehavior;
+    const prevBodyOverflow = body.style.overflow;
+
+    html.style.overscrollBehavior = 'none';
+    body.style.overscrollBehavior = 'none';
+    body.style.overflow = 'hidden';
+
+    return () => {
+      html.style.overscrollBehavior = prevHtmlOverscroll;
+      body.style.overscrollBehavior = prevBodyOverscroll;
+      body.style.overflow = prevBodyOverflow;
+    };
+  }, []);
 
   useEffect(() => {
     if (identifier) {
@@ -6808,7 +7141,7 @@ export const CitizenViewerPage: React.FC<{ isPublicRoute?: boolean }> = ({
 
   if (isLoading) {
     return (
-      <div className="h-screen w-screen bg-[#111622] flex flex-col items-center justify-center text-slate-200 gap-3">
+      <div className="h-[100dvh] w-screen bg-[#111622] flex flex-col items-center justify-center text-slate-200 gap-3">
         <div className="w-10 h-10 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
         <p className="text-sm font-semibold">Dosya Hazırlanıyor...</p>
       </div>
@@ -6842,7 +7175,7 @@ export const CitizenViewerPage: React.FC<{ isPublicRoute?: boolean }> = ({
 
   if (error || !folder) {
     return (
-      <div className="h-screen w-screen bg-[#111622] flex flex-col items-center justify-center text-slate-200 gap-4 p-6 text-center">
+      <div className="h-[100dvh] w-screen bg-[#111622] flex flex-col items-center justify-center text-slate-200 gap-4 p-6 text-center">
         <AlertTriangle className="w-10 h-10 text-amber-400" />
         <p className="text-base font-bold text-red-400">{error || 'Dosya bulunamadı.'}</p>
         <p className="text-xs text-slate-400 max-w-md">
@@ -6879,57 +7212,91 @@ export const CitizenViewerPage: React.FC<{ isPublicRoute?: boolean }> = ({
   const activePage = currentPageIndex >= 0 ? pages[currentPageIndex] : null;
 
   return (
-    <div className="h-screen w-screen overflow-hidden bg-[#111622] text-slate-100 select-none relative">
-      <div className="fixed top-4 left-4 z-30 flex items-center gap-2">
-        {!isEmbed && backTarget && (
-          <Link
-            to={backTarget}
-            title={backLabel}
-            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#1e2533]/90 hover:bg-amber-500 text-slate-200 hover:text-slate-950 backdrop-blur-md border border-white/10 font-bold text-xs shadow-xl transition-all"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>{backLabel}</span>
-          </Link>
-        )}
+    <div className="h-[100dvh] w-screen overflow-hidden overscroll-none touch-none bg-[#111622] text-slate-100 select-none relative">
+      <div className="fixed top-3 left-3 right-3 sm:right-auto z-30 flex flex-wrap items-center justify-between sm:justify-start gap-2 pointer-events-none">
+        <div className="flex flex-wrap items-center gap-2 pointer-events-auto">
+          {!isEmbed && backTarget && (
+            <Link
+              to={backTarget}
+              title={backLabel}
+              className="inline-flex items-center gap-1.5 sm:gap-2 px-3 sm:px-3.5 py-2 rounded-xl bg-[#1e2533]/90 hover:bg-amber-500 text-slate-200 hover:text-slate-950 backdrop-blur-md border border-white/10 font-bold text-xs shadow-xl transition-all"
+            >
+              <ArrowLeft className="w-4 h-4 shrink-0" />
+              <span>{backLabel}</span>
+            </Link>
+          )}
 
-        {activePage && activePage.hotspots.length > 0 && !isSpotlightActive && (
-          <button
-            type="button"
-            onClick={replayCurrentPageSpotlights}
-            title="Bu Sayfanın Kritik Uyarılarını Tekrar Göster"
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 backdrop-blur-md border border-amber-500/40 font-bold text-xs shadow-xl transition-all"
-          >
-            <AlertTriangle className="w-3.5 h-3.5" />
-            <span>Uyarıyı Göster</span>
-          </button>
+          {activePage && activePage.hotspots.length > 0 && !isSpotlightActive && (
+            <button
+              type="button"
+              onClick={replayCurrentPageSpotlights}
+              title="Bu Sayfanın Kritik Uyarılarını Tekrar Göster"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-slate-950 backdrop-blur-md border border-amber-500/40 font-bold text-xs shadow-xl transition-all"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span>Uyarıyı Göster</span>
+            </button>
+          )}
+        </div>
+
+        <button
+          type="button"
+          onClick={() => setShowTouchHelp((v) => !v)}
+          title="Dokunma Hareketleri Rehberi"
+          className={`pointer-events-auto md:hidden inline-flex items-center gap-1 px-2.5 py-2 rounded-xl backdrop-blur-md border font-bold text-xs shadow-xl transition-all ${
+            showTouchHelp
+              ? 'bg-amber-500 text-slate-950 border-amber-400'
+              : 'bg-[#1e2533]/90 text-slate-200 border-white/10'
+          }`}
+        >
+          <Hand className="w-3.5 h-3.5 shrink-0" />
+          <span>?</span>
+        </button>
+
+        {showTouchHelp && (
+          <div className="pointer-events-auto md:hidden w-full rounded-xl bg-[#1e2533]/95 backdrop-blur-md border border-amber-500/40 px-3 py-2 text-[11px] text-slate-200 shadow-2xl flex items-center justify-between gap-2">
+            <span>
+              <strong className="text-amber-300">1 parmak:</strong> Sayfa çevir •{' '}
+              <strong className="text-amber-300">2 parmak:</strong> Yakınlaş/Uzaklaş •{' '}
+              <strong className="text-amber-300">3 parmak:</strong> Taşı
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowTouchHelp(false)}
+              className="p-1 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white shrink-0"
+              aria-label="Kapat"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
         )}
       </div>
 
-      <aside className="fixed left-4 top-1/2 -translate-y-1/2 z-30 flex flex-col items-center gap-1 bg-[#1e2533]/90 backdrop-blur-md border border-white/10 rounded-2xl p-1.5 shadow-2xl">
+      <aside className="fixed bottom-3 left-1/2 -translate-x-1/2 z-30 flex flex-row items-center gap-0.5 max-w-[calc(100vw-16px)] overflow-x-auto md:left-4 md:top-1/2 md:bottom-auto md:translate-x-0 md:-translate-y-1/2 md:flex-col md:gap-1 bg-[#1e2533]/90 backdrop-blur-md border border-white/10 rounded-2xl p-1.5 shadow-2xl">
         <button
           type="button"
           onClick={zoomIn}
           title="Yakınlaş (Zoom In)"
-          className="p-2 rounded-xl hover:bg-white/15 text-slate-200 transition-colors"
+          className="p-2 rounded-xl hover:bg-white/15 text-slate-200 transition-colors shrink-0"
         >
           <Plus className="w-4 h-4" />
         </button>
-        <div className="text-[10px] font-bold text-amber-400 px-1 select-none">
+        <div className="text-[10px] font-bold text-amber-400 px-1.5 md:px-1 select-none whitespace-nowrap shrink-0">
           %{Math.round(zoomLevel * 100)}
         </div>
         <button
           type="button"
           onClick={zoomOut}
           title="Uzaklaş (Zoom Out)"
-          className="p-2 rounded-xl hover:bg-white/15 text-slate-200 transition-colors"
+          className="p-2 rounded-xl hover:bg-white/15 text-slate-200 transition-colors shrink-0"
         >
           <ZoomOut className="w-4 h-4" />
         </button>
         <button
           type="button"
           onClick={resetCameraView}
-          title="Merkeze ve Ekrana Tam Sığdır (%100)"
-          className="p-2 rounded-xl hover:bg-white/15 text-slate-200 transition-colors"
+          title="Merkeze ve Ekrana Tam Sığdır"
+          className="p-2 rounded-xl hover:bg-white/15 text-slate-200 transition-colors shrink-0"
         >
           <RotateCcw className="w-4 h-4" />
         </button>
@@ -6937,7 +7304,7 @@ export const CitizenViewerPage: React.FC<{ isPublicRoute?: boolean }> = ({
           type="button"
           onClick={() => setShowThumbDrawer((v) => !v)}
           title="Tüm Sayfalar"
-          className={`p-2 rounded-xl transition-colors ${
+          className={`p-2 rounded-xl transition-colors shrink-0 ${
             showThumbDrawer ? 'bg-amber-500 text-slate-950' : 'hover:bg-white/15 text-slate-200'
           }`}
         >
@@ -6947,7 +7314,7 @@ export const CitizenViewerPage: React.FC<{ isPublicRoute?: boolean }> = ({
           type="button"
           onClick={() => setIsAutoPlaying((v) => !v)}
           title={isAutoPlaying ? 'Otomatik Çevirmeyi Durdur' : 'Otomatik Sayfa Çevir'}
-          className={`p-2 rounded-xl transition-colors ${
+          className={`p-2 rounded-xl transition-colors shrink-0 ${
             isAutoPlaying ? 'bg-emerald-500 text-slate-950' : 'hover:bg-white/15 text-slate-200'
           }`}
         >
@@ -6957,7 +7324,7 @@ export const CitizenViewerPage: React.FC<{ isPublicRoute?: boolean }> = ({
           type="button"
           onClick={handleToggleMute}
           title={muted ? 'Sayfa Çevirme Sesini Aç' : 'Sayfa Çevirme Sesini Kapat'}
-          className="p-2 rounded-xl hover:bg-white/15 text-slate-200 transition-colors"
+          className="p-2 rounded-xl hover:bg-white/15 text-slate-200 transition-colors shrink-0"
         >
           {muted ? <VolumeX className="w-4 h-4 text-rose-400" /> : <Volume2 className="w-4 h-4" />}
         </button>
@@ -6965,13 +7332,13 @@ export const CitizenViewerPage: React.FC<{ isPublicRoute?: boolean }> = ({
           type="button"
           onClick={toggleFullscreen}
           title="Tam Ekran"
-          className="p-2 rounded-xl hover:bg-white/15 text-slate-200 transition-colors"
+          className="p-2 rounded-xl hover:bg-white/15 text-slate-200 transition-colors shrink-0"
         >
           <Maximize2 className="w-4 h-4" />
         </button>
       </aside>
 
-      <div className="fixed bottom-4 right-4 z-30 pointer-events-none hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#1e2533]/85 backdrop-blur-md border border-white/10 text-[11px] text-slate-300 shadow-lg">
+      <div className="fixed bottom-4 right-4 z-30 pointer-events-none hidden md:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#1e2533]/85 backdrop-blur-md border border-white/10 text-[11px] text-slate-300 shadow-lg">
         <Mouse className="w-3.5 h-3.5 text-amber-400 shrink-0" />
         <span>
           <strong className="text-white">Scroll Çevir:</strong> Yakınlaş •{' '}
@@ -6982,7 +7349,7 @@ export const CitizenViewerPage: React.FC<{ isPublicRoute?: boolean }> = ({
       <FlipHTML5BookStage onUpdateSpotlightRect={handleUpdateSpotlightRect} />
 
       {showThumbDrawer && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-30 bg-[#1e2430]/95 backdrop-blur-md border border-white/15 rounded-2xl p-3 shadow-2xl max-w-3xl w-[88%] overflow-x-auto flex items-center gap-3">
+        <div className="fixed bottom-16 md:bottom-4 left-1/2 -translate-x-1/2 z-30 bg-[#1e2430]/95 backdrop-blur-md border border-white/15 rounded-2xl p-3 shadow-2xl max-w-3xl w-[92%] sm:w-[88%] overflow-x-auto touch-pan-x flex items-center gap-3">
           <button
             type="button"
             onClick={() => jumpToPage(-1)}
@@ -7182,7 +7549,7 @@ export const HotspotCanvasLayer: React.FC<{
       onPointerDown={handlePointerDownBackground}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      className={`relative inline-block shadow-2xl rounded bg-white select-none overflow-hidden ${
+      className={`relative inline-block shadow-2xl rounded bg-white select-none overflow-hidden touch-none ${
         activeTool === 'select' ? 'cursor-default' : 'cursor-crosshair'
       }`}
     >
@@ -7190,7 +7557,7 @@ export const HotspotCanvasLayer: React.FC<{
         src={imageUrl}
         alt="Evrak Önizleme"
         draggable={false}
-        className="max-h-[calc(100vh-150px)] w-auto object-contain block pointer-events-none select-none"
+        className="max-h-[42dvh] lg:max-h-[calc(100vh-150px)] w-auto object-contain block pointer-events-none select-none"
       />
 
       {hotspots.map((hs, idx) => {
@@ -7318,72 +7685,77 @@ export const HotspotEditorModal: React.FC = () => {
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/95 flex flex-col">
-      <div className="h-14 px-6 bg-slate-900 border-b border-slate-800 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-3">
-          <span className="px-2.5 py-1 rounded-md bg-amber-500 text-slate-950 font-extrabold text-xs">
+      <div className="min-h-[56px] px-3 sm:px-6 py-2 bg-slate-900 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 shrink-0">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          <span className="px-2.5 py-1 rounded-md bg-amber-500 text-slate-950 font-extrabold text-xs shrink-0 whitespace-nowrap">
             {currentIndex + 1}. SAYFA
           </span>
-          <h3 className="text-sm font-bold text-white">
-            Kritik Alan ve Spot Işığı (Spotlight) Uyarı Editörü
+          <h3 className="text-xs sm:text-sm font-bold text-white truncate">
+            <span className="md:hidden">Kritik Alan Editörü</span>
+            <span className="hidden md:inline">Kritik Alan ve Spot Işığı (Spotlight) Uyarı Editörü</span>
           </h3>
           <span className="text-xs text-slate-400 hidden md:inline">({page.sourceFileName})</span>
         </div>
 
-        <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
+        <div className="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800 overflow-x-auto max-w-full">
           <button
             type="button"
             onClick={() => setActiveTool('rect')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
               activeTool === 'rect' ? 'bg-amber-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'
             }`}
           >
-            <Square className="w-3.5 h-3.5" />
-            Dikdörtgen Çiz
+            <Square className="w-3.5 h-3.5 shrink-0" />
+            <span>Dikdörtgen</span>
+            <span className="hidden md:inline">Çiz</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveTool('ellipse')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
               activeTool === 'ellipse'
                 ? 'bg-amber-500 text-slate-950'
                 : 'text-slate-300 hover:bg-slate-800'
             }`}
           >
-            <Circle className="w-3.5 h-3.5" />
-            Daire / Elips Çiz
+            <Circle className="w-3.5 h-3.5 shrink-0" />
+            <span>Elips</span>
+            <span className="hidden md:inline">/ Daire Çiz</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveTool('pin')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
               activeTool === 'pin' ? 'bg-amber-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'
             }`}
           >
-            <MapPin className="w-3.5 h-3.5" />
-            Noktasal Pin Bırak
+            <MapPin className="w-3.5 h-3.5 shrink-0" />
+            <span>Pin</span>
+            <span className="hidden md:inline">Bırak</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveTool('select')}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
               activeTool === 'select'
                 ? 'bg-amber-500 text-slate-950'
                 : 'text-slate-300 hover:bg-slate-800'
             }`}
           >
-            <MousePointer className="w-3.5 h-3.5" />
-            Seç / Taşı
+            <MousePointer className="w-3.5 h-3.5 shrink-0" />
+            <span>Seç</span>
+            <span className="hidden md:inline">/ Taşı</span>
           </button>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
           <div className="flex items-center gap-1 bg-slate-800 p-0.5 rounded-lg border border-slate-700">
             {(['A4', 'A3'] as const).map((sz) => (
               <button
                 key={sz}
                 type="button"
                 onClick={() => updatePageSize(page.id, sz)}
-                className={`px-2.5 py-1 text-xs font-bold rounded-md transition-colors ${
+                className={`px-2 sm:px-2.5 py-1 text-xs font-bold rounded-md transition-colors ${
                   page.paperSize === sz
                     ? 'bg-amber-500 text-slate-950'
                     : 'text-slate-400 hover:text-white'
@@ -7418,16 +7790,17 @@ export const HotspotEditorModal: React.FC = () => {
           <button
             type="button"
             onClick={() => openHotspotEditor(null)}
-            className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-bold text-slate-950 bg-emerald-500 hover:bg-emerald-400 transition-colors"
+            className="inline-flex items-center gap-1.5 px-3 sm:px-4 py-1.5 rounded-lg text-xs font-bold text-slate-950 bg-emerald-500 hover:bg-emerald-400 transition-colors whitespace-nowrap shrink-0"
           >
             <Check className="w-4 h-4" />
-            Tamamla ve Kapat
+            <span>Tamamla</span>
+            <span className="hidden md:inline">ve Kapat</span>
           </button>
         </div>
       </div>
 
-      <div className="flex-1 flex overflow-hidden">
-        <div className="flex-1 overflow-auto flex items-center justify-center p-6 bg-slate-950">
+      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+        <div className="flex-1 min-h-[45%] overflow-auto flex items-center justify-center p-3 sm:p-6 bg-slate-950">
           <HotspotCanvasLayer
             imageUrl={page.imageUrl}
             hotspots={localHotspots}
@@ -7438,7 +7811,7 @@ export const HotspotEditorModal: React.FC = () => {
           />
         </div>
 
-        <div className="w-96 shrink-0 bg-slate-900 border-l border-slate-800 flex flex-col">
+        <div className="w-full lg:w-96 max-h-[45%] lg:max-h-none shrink-0 bg-slate-900 border-t lg:border-t-0 lg:border-l border-slate-800 flex flex-col overflow-y-auto">
           <div className="p-4 border-b border-slate-800">
             <h4 className="text-sm font-bold text-white">
               Bu Sayfadaki Kritik Uyarılar ({localHotspots.length})
@@ -7737,7 +8110,7 @@ export const BottomTimeline: React.FC = () => {
       }}
       onDragLeave={() => setIsDragOver(false)}
       onDrop={handleFileDrop}
-      className={`h-[268px] shrink-0 bg-slate-900/95 border-t-2 transition-colors flex flex-col ${
+      className={`min-h-[236px] max-h-[45dvh] sm:h-[268px] sm:max-h-none shrink-0 bg-slate-900/95 border-t-2 transition-colors flex flex-col ${
         isDragOver ? 'border-amber-400 bg-amber-950/20' : 'border-slate-700/90'
       }`}
     >
@@ -7756,13 +8129,14 @@ export const BottomTimeline: React.FC = () => {
         }}
       />
 
-      <div className="h-11 px-6 bg-slate-950/80 border-b border-slate-800 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 text-amber-400 font-semibold text-sm">
-            <Layers className="w-4 h-4" />
-            <span>Evrak Dizilim Zaman Çizelgesi (Timeline):</span>
+      <div className="min-h-[44px] px-3 sm:px-6 py-2 bg-slate-950/80 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 text-amber-400 font-semibold text-xs sm:text-sm shrink-0">
+            <Layers className="w-4 h-4 shrink-0" />
+            <span className="sm:hidden">Zaman Çizelgesi:</span>
+            <span className="hidden sm:inline">Evrak Dizilim Zaman Çizelgesi (Timeline):</span>
           </div>
-          <span className="text-sm font-bold text-white px-2.5 py-0.5 rounded-md bg-slate-800 border border-slate-700">
+          <span className="text-xs sm:text-sm font-bold text-white px-2 sm:px-2.5 py-0.5 rounded-md bg-slate-800 border border-slate-700 truncate max-w-[140px] sm:max-w-xs">
             {selectedFolder.title}
           </span>
           <span className="text-xs text-slate-400 hidden lg:inline">
@@ -7770,9 +8144,9 @@ export const BottomTimeline: React.FC = () => {
           </span>
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2 sm:gap-2.5 flex-wrap">
           {isUploading && (
-            <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-amber-500/15 border border-amber-500/40 text-amber-300 text-xs font-medium">
+            <div className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/40 text-amber-300 text-xs font-medium shrink-0">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
               <span>{uploadMessage || 'Dönüştürülüyor...'}</span>
             </div>
@@ -7782,32 +8156,34 @@ export const BottomTimeline: React.FC = () => {
             type="button"
             disabled={isUploading}
             onClick={() => triggerUploadAt(undefined)}
-            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-950 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 transition-colors shadow"
+            className="inline-flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-950 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 transition-colors shadow whitespace-nowrap shrink-0"
           >
-            <FileUp className="w-3.5 h-3.5" />
-            + Evrak Yükle (PDF, Word, Excel, Görsel)
+            <FileUp className="w-3.5 h-3.5 shrink-0" />
+            <span>+ Evrak Yükle</span>
+            <span className="hidden md:inline">(PDF, Word, Excel, Görsel)</span>
           </button>
 
           <Link
             to={testViewerLink}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
+            className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors whitespace-nowrap shrink-0"
           >
-            <ExternalLink className="w-3.5 h-3.5 text-amber-400" />
-            3D Dosyada Test Et
+            <ExternalLink className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span className="sm:hidden">3D Test</span>
+            <span className="hidden sm:inline">3D Dosyada Test Et</span>
           </Link>
 
           <button
             type="button"
             onClick={() => selectFolder(null)}
             title="Timeline'ı Kapat"
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
       </div>
 
-      <div className="flex-1 overflow-x-auto overflow-y-hidden px-6 py-3 flex items-center">
+      <div className="flex-1 overflow-x-auto overflow-y-hidden touch-pan-x px-3 sm:px-6 py-2.5 sm:py-3 flex items-center">
         {pages.length === 0 ? (
           <div
             onClick={() => triggerUploadAt(0)}
@@ -7958,7 +8334,7 @@ const SortableFolderCard: React.FC<{
         e.stopPropagation();
         onStartEdit();
       }}
-      className={`group relative flex flex-col items-center rounded-2xl p-4 cursor-pointer select-none transition-all border ${
+      className={`group relative overflow-hidden min-w-0 flex flex-col items-center rounded-2xl p-2.5 sm:p-4 cursor-pointer select-none transition-all border ${
         isSelected
           ? 'bg-amber-500/15 border-amber-500/70 shadow-xl shadow-amber-950/30 ring-2 ring-amber-500/30'
           : 'bg-slate-800/55 hover:bg-slate-800 border-slate-700/70 hover:border-slate-600'
@@ -7966,15 +8342,15 @@ const SortableFolderCard: React.FC<{
         !isPublished ? 'opacity-80' : ''
       }`}
     >
-      <div className="w-full flex items-center justify-between mb-1.5 gap-1">
-        <div className="flex items-center gap-1">
+      <div className="w-full flex flex-wrap items-center justify-between mb-1.5 gap-1">
+        <div className="flex items-center gap-1 min-w-0">
           <button
             type="button"
             {...attributes}
             {...listeners}
             onClick={(e) => e.stopPropagation()}
             title="Sıralamak için sürükleyin"
-            className="p-1 rounded text-slate-400 hover:text-slate-200 hover:bg-slate-700/60 cursor-grab active:cursor-grabbing"
+            className="p-1 rounded text-slate-400 hover:text-slate-200 hover:bg-slate-700/60 cursor-grab active:cursor-grabbing shrink-0"
           >
             <GripVertical className="w-4 h-4" />
           </button>
@@ -7986,7 +8362,7 @@ const SortableFolderCard: React.FC<{
               onTogglePublished();
             }}
             title={isPublished ? 'Yayında (Gizlemek için tıklayın)' : 'Taslak (Yayınlamak için tıklayın)'}
-            className={`px-1.5 py-0.5 rounded-full text-[9px] font-extrabold inline-flex items-center gap-1 border transition-colors ${
+            className={`px-1.5 py-0.5 rounded-full text-[9px] font-extrabold inline-flex items-center gap-1 border transition-colors whitespace-nowrap ${
               isPublished
                 ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/25'
                 : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-white'
@@ -7997,7 +8373,7 @@ const SortableFolderCard: React.FC<{
           </button>
         </div>
 
-        <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+        <div className="w-full grid grid-cols-4 gap-1 mt-1.5 sm:mt-0 sm:w-auto sm:flex sm:items-center opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
           <button
             type="button"
             onClick={(e) => {
@@ -8005,7 +8381,7 @@ const SortableFolderCard: React.FC<{
               onShareFolder();
             }}
             title="Paylaş / QR Kod"
-            className="p-1.5 rounded-lg bg-slate-700/80 hover:bg-amber-500 text-amber-300 hover:text-slate-950 transition-colors"
+            className="flex items-center justify-center p-1.5 rounded-lg bg-slate-700/80 hover:bg-amber-500 text-amber-300 hover:text-slate-950 transition-colors"
           >
             <Share2 className="w-3.5 h-3.5" />
           </button>
@@ -8013,7 +8389,7 @@ const SortableFolderCard: React.FC<{
             to={`/d/${folder.shareToken || folder.id}`}
             onClick={(e) => e.stopPropagation()}
             title="Vatandaş 3D Görünümünde Aç"
-            className="p-1.5 rounded-lg bg-slate-700/80 hover:bg-sky-500 text-slate-200 hover:text-slate-950 transition-colors"
+            className="flex items-center justify-center p-1.5 rounded-lg bg-slate-700/80 hover:bg-sky-500 text-slate-200 hover:text-slate-950 transition-colors"
           >
             <ExternalLink className="w-3.5 h-3.5" />
           </Link>
@@ -8024,7 +8400,7 @@ const SortableFolderCard: React.FC<{
               onStartEdit();
             }}
             title="Dosya Adını Değiştir"
-            className="p-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-600 text-slate-200 transition-colors"
+            className="flex items-center justify-center p-1.5 rounded-lg bg-slate-700/80 hover:bg-slate-600 text-slate-200 transition-colors"
           >
             <Edit2 className="w-3.5 h-3.5" />
           </button>
@@ -8035,7 +8411,7 @@ const SortableFolderCard: React.FC<{
               onRequestDelete();
             }}
             title="Dosyayı Sil"
-            className="p-1.5 rounded-lg bg-slate-700/80 hover:bg-red-600 text-slate-200 hover:text-white transition-colors"
+            className="flex items-center justify-center p-1.5 rounded-lg bg-slate-700/80 hover:bg-red-600 text-slate-200 hover:text-white transition-colors"
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>
@@ -8047,7 +8423,7 @@ const SortableFolderCard: React.FC<{
           title={folder.title}
           pageCount={folder.pages.length}
           hasA3={hasA3}
-          className="w-36 h-48 drop-shadow-xl"
+          className="w-24 h-32 sm:w-32 sm:h-44 md:w-36 md:h-48 drop-shadow-xl"
         />
       </div>
 
@@ -8134,13 +8510,13 @@ export const ExplorerGrid: React.FC<{ onShareFolder: (folder: FolderItem) => voi
   };
 
   return (
-    <div className="flex-1 overflow-y-auto px-6 py-5">
+    <div className="flex-1 overflow-y-auto px-3 sm:px-6 py-4 sm:py-5">
       <div className="max-w-7xl mx-auto">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap items-center justify-between mb-4 gap-2">
           <div>
-            <h2 className="text-base font-semibold text-slate-200 flex items-center gap-2">
-              Dosya Kategorileri (Yarım Kapak Başvuru Dosyaları)
-              <span className="px-2 py-0.5 text-xs rounded-full bg-slate-800 text-slate-400 border border-slate-700">
+            <h2 className="text-sm sm:text-base font-semibold text-slate-200 flex flex-wrap items-center gap-2">
+              <span>Dosya Kategorileri (Yarım Kapak Başvuru Dosyaları)</span>
+              <span className="px-2 py-0.5 text-xs rounded-full bg-slate-800 text-slate-400 border border-slate-700 whitespace-nowrap shrink-0">
                 {folders.length} Klasör
               </span>
             </h2>
@@ -8175,7 +8551,7 @@ export const ExplorerGrid: React.FC<{ onShareFolder: (folder: FolderItem) => voi
             onDragEnd={handleDragEnd}
           >
             <SortableContext items={folders.map((f) => f.id)} strategy={rectSortingStrategy}>
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4">
                 {folders.map((folder) => (
                   <SortableFolderCard
                     key={folder.id}
@@ -8197,7 +8573,7 @@ export const ExplorerGrid: React.FC<{ onShareFolder: (folder: FolderItem) => voi
                 <button
                   type="button"
                   onClick={() => createFolder()}
-                  className="flex flex-col items-center justify-center rounded-2xl p-4 border-2 border-dashed border-slate-700/80 hover:border-amber-500/60 bg-slate-900/30 hover:bg-slate-800/50 text-slate-400 hover:text-amber-400 transition-all min-h-[260px] group"
+                  className="flex flex-col items-center justify-center rounded-2xl p-3 sm:p-4 border-2 border-dashed border-slate-700/80 hover:border-amber-500/60 bg-slate-900/30 hover:bg-slate-800/50 text-slate-400 hover:text-amber-400 transition-all min-h-[210px] sm:min-h-[260px] text-center group min-w-0"
                 >
                   <div className="w-12 h-12 rounded-full bg-slate-800 group-hover:bg-amber-500/20 flex items-center justify-center mb-3 transition-colors">
                     <FolderPlus className="w-6 h-6" />
@@ -8260,7 +8636,7 @@ export const AdminLayout: React.FC = () => {
 
   if (isInitializing) {
     return (
-      <div className="h-screen w-screen bg-slate-950 flex flex-col items-center justify-center text-slate-200 gap-3">
+      <div className="h-[100dvh] w-screen bg-slate-950 flex flex-col items-center justify-center text-slate-200 gap-3">
         <div className="w-10 h-10 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
         <p className="text-xs font-semibold text-slate-400">Yönetim Paneli Hazırlanıyor...</p>
       </div>
@@ -8276,9 +8652,9 @@ export const AdminLayout: React.FC = () => {
   }
 
   return (
-    <div className="h-screen w-screen overflow-hidden flex flex-col bg-slate-950 text-slate-100">
-      <header className="h-14 px-5 bg-slate-900 border-b border-slate-800 flex items-center justify-between shrink-0 gap-3">
-        <div className="flex items-center gap-3 min-w-0">
+    <div className="h-[100dvh] w-screen overflow-hidden flex flex-col bg-slate-950 text-slate-100">
+      <header className="min-h-14 h-auto px-3 sm:px-5 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between shrink-0 gap-2">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-center text-amber-400 shrink-0">
             <ShieldCheck className="w-5 h-5" />
           </div>
@@ -8287,7 +8663,7 @@ export const AdminLayout: React.FC = () => {
               <h1 className="text-sm font-bold text-white tracking-tight truncate">
                 {user.displayName}
               </h1>
-              <span className="px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-[10px] font-semibold text-amber-300 shrink-0">
+              <span className="hidden sm:inline-block px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-[10px] font-semibold text-amber-300 shrink-0">
                 @{user.username}
               </span>
             </div>
@@ -8295,11 +8671,11 @@ export const AdminLayout: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           <button
             type="button"
             onClick={() => createFolder()}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold text-slate-950 bg-amber-500 hover:bg-amber-400 shadow-lg shadow-amber-500/15 transition-all"
+            className="inline-flex items-center gap-1.5 px-2.5 sm:px-3.5 py-2 rounded-xl text-xs font-bold text-slate-950 bg-amber-500 hover:bg-amber-400 shadow-lg shadow-amber-500/15 transition-all"
           >
             <FolderPlus className="w-4 h-4" />
             <span className="hidden sm:inline">+ Yeni Dosya Ekle</span>
@@ -8308,7 +8684,7 @@ export const AdminLayout: React.FC = () => {
           <button
             type="button"
             onClick={() => setShareTarget({ mode: 'workspace' })}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold text-amber-300 bg-amber-500/15 hover:bg-amber-500 hover:text-slate-950 border border-amber-500/40 transition-all"
+            className="inline-flex items-center gap-1.5 px-2.5 sm:px-3.5 py-2 rounded-xl text-xs font-bold text-amber-300 bg-amber-500/15 hover:bg-amber-500 hover:text-slate-950 border border-amber-500/40 transition-all"
           >
             <Share2 className="w-4 h-4" />
             <span className="hidden md:inline">Masaüstümü Paylaş (Link & QR)</span>
@@ -8318,7 +8694,7 @@ export const AdminLayout: React.FC = () => {
             type="button"
             onClick={() => setSettingsOpen(true)}
             title="Masaüstü ve Hesap Ayarları"
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
+            className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
           >
             <Settings className="w-4 h-4 text-slate-300" />
             <span className="hidden lg:inline">Ayarlar</span>
@@ -8326,7 +8702,7 @@ export const AdminLayout: React.FC = () => {
 
           <Link
             to={`/v/${user.workspaceSlug}`}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
+            className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors"
           >
             <Eye className="w-4 h-4 text-amber-400" />
             <span className="hidden lg:inline">Vatandaş Vitrinim</span>
