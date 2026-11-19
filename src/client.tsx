@@ -5399,6 +5399,10 @@ export const FlipHTML5BookStage: React.FC<{
   const activePage: PageItem | undefined =
     currentPageIndex >= 0 ? pages[currentPageIndex] : undefined;
   const isA3Unfolded = activePage ? (a3UnfoldTarget[activePage.id] ?? 0) > 0.5 : false;
+  const flipBleedY = Math.ceil(Math.hypot(pageDims.w, pageDims.h) - pageDims.h) + 36;
+  const flipBleedX = 36;
+  const flipCanvasW = pageDims.w * 2 + flipBleedX * 2;
+  const flipCanvasH = pageDims.h + flipBleedY * 2;
 
   useEffect(() => {
     const parentEl = bookWrapperRef.current;
@@ -5424,6 +5428,9 @@ export const FlipHTML5BookStage: React.FC<{
 
     parentEl.innerHTML = '';
     const mountEl = document.createElement('div');
+    mountEl.style.width = `${flipCanvasW}px`;
+    mountEl.style.height = `${flipCanvasH}px`;
+    mountEl.style.position = 'relative';
     parentEl.appendChild(mountEl);
 
     const startDocIdx = useViewerStore.getState().currentPageIndex;
@@ -5434,6 +5441,7 @@ export const FlipHTML5BookStage: React.FC<{
       width: pageDims.w,
       height: pageDims.h,
       size: 'fixed',
+      autoSize: false,
       minWidth: pageDims.w,
       maxWidth: pageDims.w,
       minHeight: pageDims.h,
@@ -5592,8 +5600,8 @@ export const FlipHTML5BookStage: React.FC<{
       // Zoom seviyesine (CSS transform: scale) göre fare/dokunma koordinatlarını normalize et
       uiObj.getMousePos = (clientX: number, clientY: number) => {
         const rect = distEl.getBoundingClientRect();
-        const layoutW = distEl.offsetWidth || pageDims.w * 2;
-        const layoutH = distEl.offsetHeight || pageDims.h;
+        const layoutW = distEl.offsetWidth || flipCanvasW;
+        const layoutH = distEl.offsetHeight || flipCanvasH;
         const scaleX = rect.width > 0 ? layoutW / rect.width : 1;
         const scaleY = rect.height > 0 ? layoutH / rect.height : 1;
         return {
@@ -5601,9 +5609,75 @@ export const FlipHTML5BookStage: React.FC<{
           y: (clientY - rect.top) * scaleY,
         };
       };
+
+      if (typeof uiObj.onTouchEnd === 'function') {
+        window.removeEventListener('touchend', uiObj.onTouchEnd);
+        uiObj.onTouchEnd = (ev: TouchEvent) => {
+          if (ev.changedTouches.length > 0) {
+            const t = ev.changedTouches[0];
+            const pos = uiObj.getMousePos(t.clientX, t.clientY);
+            let isSwipe = false;
+            if (uiObj.touchPoint !== null) {
+              const dx = pos.x - uiObj.touchPoint.point.x;
+              const dy = Math.abs(pos.y - uiObj.touchPoint.point.y);
+              if (
+                Math.abs(dx) > uiObj.swipeDistance &&
+                dy < 2 * uiObj.swipeDistance &&
+                Date.now() - uiObj.touchPoint.time < uiObj.swipeTimeout
+              ) {
+                const r = renderObj?.getRect?.();
+                const midY = r ? r.top + r.height / 2 : flipCanvasH / 2;
+                const corner = uiObj.touchPoint.point.y < midY ? 'top' : 'bottom';
+                if (dx > 0) {
+                  (flip as any).flipPrev(corner);
+                } else {
+                  (flip as any).flipNext(corner);
+                }
+                isSwipe = true;
+              }
+              uiObj.touchPoint = null;
+            }
+            (flip as any).userStop(pos, isSwipe);
+          }
+        };
+        window.addEventListener('touchend', uiObj.onTouchEnd);
+      }
     }
 
     if (renderObj && renderObj.ctx && renderObj.canvas) {
+      renderObj.drawInnerShadow = function () {
+        const t = this.getRect();
+        this.ctx.save();
+        this.ctx.beginPath();
+        const e = this.convertToGlobal({ x: this.shadow.pos.x, y: this.shadow.pos.y });
+        const i = this.convertRectToGlobal(this.pageRect);
+        this.ctx.moveTo(i.topLeft.x, i.topLeft.y);
+        this.ctx.lineTo(i.topRight.x, i.topRight.y);
+        this.ctx.lineTo(i.bottomRight.x, i.bottomRight.y);
+        this.ctx.lineTo(i.bottomLeft.x, i.bottomLeft.y);
+        this.ctx.translate(e.x, e.y);
+        this.ctx.rotate(Math.PI + this.shadow.angle + Math.PI / 2);
+        const s = (3 * this.shadow.width) / 4;
+        const n = this.ctx.createLinearGradient(0, 0, s, 0);
+        if (this.shadow.direction === 0) {
+          this.ctx.translate(-s, -t.height);
+          n.addColorStop(1, `rgba(0, 0, 0, ${this.shadow.opacity})`);
+          n.addColorStop(0.9, 'rgba(0, 0, 0, 0.05)');
+          n.addColorStop(0.7, `rgba(0, 0, 0, ${this.shadow.opacity})`);
+          n.addColorStop(0, 'rgba(0, 0, 0, 0)');
+        } else {
+          this.ctx.translate(0, -t.height);
+          n.addColorStop(0, `rgba(0, 0, 0, ${this.shadow.opacity})`);
+          n.addColorStop(0.1, 'rgba(0, 0, 0, 0.05)');
+          n.addColorStop(0.3, `rgba(0, 0, 0, ${this.shadow.opacity})`);
+          n.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        }
+        this.ctx.clip();
+        this.ctx.fillStyle = n;
+        this.ctx.fillRect(0, 0, s, 3 * t.height);
+        this.ctx.restore();
+      };
+
       const origDrawFrame = renderObj.drawFrame.bind(renderObj);
       renderObj.drawFrame = function () {
         const rect = this.getRect();
@@ -5836,16 +5910,16 @@ export const FlipHTML5BookStage: React.FC<{
               const outerGrad = ctx.createLinearGradient(0, 0, osw, 0);
               const op = (this.shadow.opacity ?? 0.35) * 0.85;
               if (dir === 0) {
-                ctx.translate(0, -100);
+                ctx.translate(0, -rect.height);
                 outerGrad.addColorStop(0, `rgba(0, 0, 0, ${op})`);
                 outerGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
               } else {
-                ctx.translate(-osw, -100);
+                ctx.translate(-osw, -rect.height);
                 outerGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
                 outerGrad.addColorStop(1, `rgba(0, 0, 0, ${op})`);
               }
               ctx.fillStyle = outerGrad;
-              ctx.fillRect(0, 0, osw, rect.height * 2);
+              ctx.fillRect(0, 0, osw, rect.height * 3);
             }
             ctx.restore();
           }
@@ -5906,20 +5980,20 @@ export const FlipHTML5BookStage: React.FC<{
                 const innerGrad = ctx.createLinearGradient(0, 0, isw, 0);
                 const op = this.shadow.opacity ?? 0.35;
                 if (dir === 0) {
-                  ctx.translate(-isw, -100);
+                  ctx.translate(-isw, -rect.height);
                   innerGrad.addColorStop(1, `rgba(0, 0, 0, ${op})`);
                   innerGrad.addColorStop(0.85, 'rgba(0, 0, 0, 0.05)');
                   innerGrad.addColorStop(0.65, `rgba(0, 0, 0, ${op * 0.85})`);
                   innerGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
                 } else {
-                  ctx.translate(0, -100);
+                  ctx.translate(0, -rect.height);
                   innerGrad.addColorStop(0, `rgba(0, 0, 0, ${op})`);
                   innerGrad.addColorStop(0.15, 'rgba(0, 0, 0, 0.05)');
                   innerGrad.addColorStop(0.35, `rgba(0, 0, 0, ${op * 0.85})`);
                   innerGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
                 }
                 ctx.fillStyle = innerGrad;
-                ctx.fillRect(0, 0, isw, rect.height * 2);
+                ctx.fillRect(0, 0, isw, rect.height * 3);
                 ctx.restore();
               }
             }
@@ -5931,14 +6005,25 @@ export const FlipHTML5BookStage: React.FC<{
     }
 
     const isOutsideHalfCoverArea = (clientX: number, clientY: number): boolean => {
-      if (!uiObj || typeof uiObj.getMousePos !== 'function') return false;
-      const spreadIdx = getSpreadIdx();
-      if (spreadIdx !== 0 && spreadIdx !== 1) return false;
+      if (!uiObj || typeof uiObj.getMousePos !== 'function' || !renderObj) return false;
+      const rect = renderObj.getRect();
       const pos = uiObj.getMousePos(clientX, clientY);
-      if (spreadIdx === 0) {
-        return pos.x > pageDims.w + flapW;
+      if (
+        pos.x < rect.left ||
+        pos.x > rect.left + rect.width ||
+        pos.y < rect.top ||
+        pos.y > rect.top + rect.height
+      ) {
+        return true;
       }
-      return pos.x < pageDims.w - flapW;
+      const spreadIdx = getSpreadIdx();
+      if (spreadIdx === 0) {
+        return pos.x > rect.left + rect.pageWidth + flapW;
+      }
+      if (spreadIdx === 1) {
+        return pos.x < rect.left + rect.pageWidth - flapW;
+      }
+      return false;
     };
 
     const onCaptureMouseDown = (ev: MouseEvent) => {
@@ -6011,28 +6096,36 @@ export const FlipHTML5BookStage: React.FC<{
 
       const origFlipNext = flipCtrl.flipNext.bind(flipCtrl);
       flipCtrl.flipNext = (corner: 'top' | 'bottom' = 'top') => {
-        if (getSpreadIdx() === 0 && renderObj) {
-          const rect = renderObj.getRect();
-          flipCtrl.flip({
-            x: rect.left + rect.pageWidth + flapW - 10,
-            y: corner === 'top' ? 1 : rect.height - 2,
-          });
+        if (!renderObj) {
+          origFlipNext(corner);
           return;
         }
-        origFlipNext(corner);
+        const rect = renderObj.getRect();
+        const targetX =
+          getSpreadIdx() === 0
+            ? rect.left + rect.pageWidth + flapW - 10
+            : rect.left + 2 * rect.pageWidth - 10;
+        flipCtrl.flip({
+          x: targetX,
+          y: rect.top + (corner === 'top' ? 1 : rect.height - 2),
+        });
       };
 
       const origFlipPrev = flipCtrl.flipPrev.bind(flipCtrl);
       flipCtrl.flipPrev = (corner: 'top' | 'bottom' = 'top') => {
-        if (getSpreadIdx() === 1 && renderObj) {
-          const rect = renderObj.getRect();
-          flipCtrl.flip({
-            x: rect.left + rect.pageWidth - flapW + 10,
-            y: corner === 'top' ? 1 : rect.height - 2,
-          });
+        if (!renderObj) {
+          origFlipPrev(corner);
           return;
         }
-        origFlipPrev(corner);
+        const rect = renderObj.getRect();
+        const targetX =
+          getSpreadIdx() === 1
+            ? rect.left + rect.pageWidth - flapW + 10
+            : rect.left + 10;
+        flipCtrl.flip({
+          x: targetX,
+          y: rect.top + (corner === 'top' ? 1 : rect.height - 2),
+        });
       };
 
       (flip as any).startUserTouch = (pos: { x: number; y: number }) => {
@@ -6581,9 +6674,18 @@ export const FlipHTML5BookStage: React.FC<{
       >
         <div
           style={{ width: pageDims.w * 2, height: pageDims.h }}
-          className="relative drop-shadow-[0_28px_60px_rgba(0,0,0,0.75)]"
+          className="relative"
         >
-          <div ref={bookWrapperRef} className="w-full h-full" />
+          <div
+            ref={bookWrapperRef}
+            style={{
+              left: -flipBleedX,
+              top: -flipBleedY,
+              width: flipCanvasW,
+              height: flipCanvasH,
+            }}
+            className="absolute drop-shadow-[0_28px_60px_rgba(0,0,0,0.75)]"
+          />
 
           <div
             ref={rightPageSurfaceRef}
