@@ -6,8 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://92.5.184.145.sslip.io"><strong>🌐 Live Demo / Canlı Demo: https://92.5.184.145.sslip.io</strong></a><br />
-  <sub>⏳ Upcoming Domain / Yakında Yeni Alan Adı: <code>evrakim.is-a.dev</code> (pending approval / onay bekliyor)</sub>
+  <a href="https://92.5.184.145.sslip.io"><strong>🌐 Live Demo / Canlı Demo: https://92.5.184.145.sslip.io</strong></a>
 </p>
 
 <p align="center">
@@ -26,8 +25,7 @@
 
 Try the live platform directly in your browser without installing anything:
 
-👉 **[https://92.5.184.145.sslip.io](https://92.5.184.145.sslip.io)**  
-⏳ **Upcoming Custom Domain:** `evrakim.is-a.dev` *(pending approval)*
+👉 **[https://92.5.184.145.sslip.io](https://92.5.184.145.sslip.io)**
 
 ---
 
@@ -102,8 +100,7 @@ This project is open source under the **MIT License**. See [LICENSE](./LICENSE) 
 
 Kurulum yapmadan doğrudan tarayıcınızdan canlı sistemi inceleyebilir ve deneyebilirsiniz:
 
-👉 **[https://92.5.184.145.sslip.io](https://92.5.184.145.sslip.io)**  
-⏳ **Yakında Yeni Alan Adı:** `evrakim.is-a.dev` *(onay bekliyor)*
+👉 **[https://92.5.184.145.sslip.io](https://92.5.184.145.sslip.io)**
 
 ---
 
